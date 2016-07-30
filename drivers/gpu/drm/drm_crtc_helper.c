@@ -31,7 +31,10 @@
 
 #include <linux/kernel.h>
 #include <linux/export.h>
+#include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <asm/param.h>
+#include <asm/bug.h>
 
 #include <drm/drmP.h>
 #include <drm/drm_atomic.h>
@@ -40,7 +43,9 @@
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_plane_helper.h>
+#ifndef __NetBSD__
 #include <drm/drm_atomic_helper.h>
+#endif
 #include <drm/drm_edid.h>
 
 /**
