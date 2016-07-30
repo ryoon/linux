@@ -63,6 +63,14 @@ static struct dentry *drm_debugfs_root;
 
 void drm_err(const char *format, ...)
 {
+#ifdef __NetBSD__
+	va_list args;
+
+	va_start(args, format);
+	printf("DRM error in %s: ", func);
+	vprintf(format, args);
+	va_end(args);
+#else
 	struct va_format vaf;
 	va_list args;
 
@@ -75,11 +83,20 @@ void drm_err(const char *format, ...)
 	       __builtin_return_address(0), &vaf);
 
 	va_end(args);
+#endif
 }
 EXPORT_SYMBOL(drm_err);
 
 void drm_ut_debug_printk(const char *function_name, const char *format, ...)
 {
+#ifdef __NetBSD__
+	va_list args;
+
+	va_start(args, format);
+	printf("DRM debug in %s: ", function_name);
+	vprintf(format, args);
+	va_end(args);
+#else
 	struct va_format vaf;
 	va_list args;
 
@@ -90,6 +107,7 @@ void drm_ut_debug_printk(const char *function_name, const char *format, ...)
 	printk(KERN_DEBUG "[" DRM_NAME ":%s] %pV", function_name, &vaf);
 
 	va_end(args);
+#endif
 }
 EXPORT_SYMBOL(drm_ut_debug_printk);
 
@@ -103,7 +121,11 @@ struct drm_master *drm_master_create(struct drm_minor *minor)
 
 	kref_init(&master->refcount);
 	spin_lock_init(&master->lock.spinlock);
+#ifdef __NetBSD__
+	DRM_INIT_WAITQUEUE(&master->lock.lock_queue, "drmlockq");
+#else
 	init_waitqueue_head(&master->lock.lock_queue);
+#endif
 	idr_init(&master->magic_map);
 	master->minor = minor;
 
@@ -126,6 +148,11 @@ static void drm_master_destroy(struct kref *kref)
 		dev->driver->master_destroy(dev, master);
 
 	drm_legacy_master_rmmaps(dev, master);
+
+#ifdef __NetBSD__
+	spin_lock_destroy(&master->lock.spinlock);
+	DRM_DESTROY_WAITQUEUE(&master->lock.lock_queue);
+#endif
 
 	idr_destroy(&master->magic_map);
 	kfree(master->unique);
@@ -299,7 +326,9 @@ static int drm_minor_register(struct drm_device *dev, unsigned int type)
 {
 	struct drm_minor *minor;
 	unsigned long flags;
+#ifndef __NetBSD__
 	int ret;
+#endif
 
 	DRM_DEBUG("\n");
 
@@ -307,6 +336,7 @@ static int drm_minor_register(struct drm_device *dev, unsigned int type)
 	if (!minor)
 		return 0;
 
+#ifndef __NetBSD__
 	ret = drm_debugfs_init(minor, minor->index, drm_debugfs_root);
 	if (ret) {
 		DRM_ERROR("DRM: Failed to initialize /sys/kernel/debug/dri.\n");
@@ -316,6 +346,7 @@ static int drm_minor_register(struct drm_device *dev, unsigned int type)
 	ret = device_add(minor->kdev);
 	if (ret)
 		goto err_debugfs;
+#endif
 
 	/* replace NULL with @minor so lookups will succeed from now on */
 	spin_lock_irqsave(&drm_minor_lock, flags);
@@ -325,9 +356,11 @@ static int drm_minor_register(struct drm_device *dev, unsigned int type)
 	DRM_DEBUG("new minor registered %d\n", minor->index);
 	return 0;
 
+#ifndef __NetBSD__
 err_debugfs:
 	drm_debugfs_cleanup(minor);
 	return ret;
+#endif
 }
 
 static void drm_minor_unregister(struct drm_device *dev, unsigned int type)
@@ -476,6 +509,24 @@ void drm_unplug_dev(struct drm_device *dev)
 }
 EXPORT_SYMBOL(drm_unplug_dev);
 
+#ifdef __NetBSD__
+
+struct inode;
+
+static struct inode *
+drm_fs_inode_new(void)
+{
+	return NULL;
+}
+
+static void
+drm_fs_inode_free(struct inode *inode)
+{
+	KASSERT(inode == NULL);
+}
+
+#else
+
 /*
  * DRM internal mount
  * We want to be able to allocate our own "struct address_space" to control
@@ -548,6 +599,8 @@ static void drm_fs_inode_free(struct inode *inode)
 	}
 }
 
+#endif
+
 /**
  * drm_dev_alloc - Allocate new DRM device
  * @driver: DRM driver to allocate device for
@@ -589,10 +642,16 @@ struct drm_device *drm_dev_alloc(struct drm_driver *driver,
 
 	spin_lock_init(&dev->buf_lock);
 	spin_lock_init(&dev->event_lock);
+#ifdef __NetBSD__
+	linux_mutex_init(&dev->struct_mutex);
+	linux_mutex_init(&dev->ctxlist_mutex);
+	linux_mutex_init(&dev->master_mutex);
+#else
 	mutex_init(&dev->struct_mutex);
 	mutex_init(&dev->filelist_mutex);
 	mutex_init(&dev->ctxlist_mutex);
 	mutex_init(&dev->master_mutex);
+#endif
 
 	dev->anon_inode = drm_fs_inode_new();
 	if (IS_ERR(dev->anon_inode)) {
@@ -652,7 +711,15 @@ err_minors:
 	drm_minor_free(dev, DRM_MINOR_CONTROL);
 	drm_fs_inode_free(dev->anon_inode);
 err_free:
+#ifdef __NetBSD__
+	linux_mutex_destroy(&dev->struct_mutex);
+	linux_mutex_destroy(&dev->ctxlist_mutex);
+	linux_mutex_destroy(&dev->master_mutex);
+	spin_lock_destroy(&dev->event_lock);
+	spin_lock_destroy(&dev->count_lock);
+#else
 	mutex_destroy(&dev->master_mutex);
+#endif
 	kfree(dev);
 	return NULL;
 }
@@ -673,7 +740,15 @@ static void drm_dev_release(struct kref *ref)
 	drm_minor_free(dev, DRM_MINOR_RENDER);
 	drm_minor_free(dev, DRM_MINOR_CONTROL);
 
+#ifdef __NetBSD__
+	linux_mutex_destroy(&dev->struct_mutex);
+	linux_mutex_destroy(&dev->ctxlist_mutex);
+	linux_mutex_destroy(&dev->master_mutex);
+	spin_lock_destroy(&dev->event_lock);
+	spin_lock_destroy(&dev->count_lock);
+#else
 	mutex_destroy(&dev->master_mutex);
+#endif
 	kfree(dev->unique);
 	kfree(dev);
 }
@@ -739,7 +814,9 @@ int drm_dev_register(struct drm_device *dev, unsigned long flags)
 {
 	int ret;
 
+#ifndef __NetBSD__
 	mutex_lock(&drm_global_mutex);
+#endif
 
 	ret = drm_minor_register(dev, DRM_MINOR_CONTROL);
 	if (ret)
@@ -767,7 +844,9 @@ err_minors:
 	drm_minor_unregister(dev, DRM_MINOR_RENDER);
 	drm_minor_unregister(dev, DRM_MINOR_CONTROL);
 out_unlock:
+#ifndef __NetBSD__
 	mutex_unlock(&drm_global_mutex);
+#endif
 	return ret;
 }
 EXPORT_SYMBOL(drm_dev_register);
@@ -792,8 +871,10 @@ void drm_dev_unregister(struct drm_device *dev)
 	if (dev->driver->unload)
 		dev->driver->unload(dev);
 
+#ifndef __NetBSD__		/* Moved to drm_pci.  */
 	if (dev->agp)
 		drm_pci_agp_destroy(dev);
+#endif
 
 	drm_vblank_cleanup(dev);
 
