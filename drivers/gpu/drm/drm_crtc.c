@@ -29,10 +29,14 @@
  *      Dave Airlie <airlied@linux.ie>
  *      Jesse Barnes <jesse.barnes@intel.com>
  */
+#include <linux/err.h>
+#include <linux/spinlock.h>
 #include <linux/ctype.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/export.h>
+#include <linux/errno.h>
+#include <asm/bug.h>
 #include <drm/drmP.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
@@ -282,6 +286,7 @@ static int drm_mode_object_get_reg(struct drm_device *dev,
 {
 	int ret;
 
+	idr_preload(GFP_KERNEL);
 	mutex_lock(&dev->mode_config.idr_mutex);
 	ret = idr_alloc(&dev->mode_config.crtc_idr, register_obj ? obj : NULL, 1, 0, GFP_KERNEL);
 	if (ret >= 0) {
@@ -297,6 +302,7 @@ static int drm_mode_object_get_reg(struct drm_device *dev,
 		}
 	}
 	mutex_unlock(&dev->mode_config.idr_mutex);
+	idr_preload_end();
 
 	return ret < 0 ? ret : 0;
 }
@@ -599,7 +605,7 @@ void drm_framebuffer_remove(struct drm_framebuffer *fb)
 	 * in-use fb with fb-id == 0. Userspace is allowed to shoot its own foot
 	 * in this manner.
 	 */
-	if (drm_framebuffer_read_refcount(fb) > 1) {
+	if (!kref_exclusive_p(&fb->refcount)) {
 		drm_modeset_lock_all(dev);
 		/* remove from any CRTC */
 		drm_for_each_crtc(crtc, dev) {
@@ -1111,11 +1117,13 @@ EXPORT_SYMBOL(drm_connector_register_all);
  */
 void drm_connector_unregister_all(struct drm_device *dev)
 {
+#ifndef __NetBSD__
 	struct drm_connector *connector;
 
 	/* FIXME: taking the mode config mutex ends up in a clash with sysfs */
 	list_for_each_entry(connector, &dev->mode_config.connector_list, head)
 		drm_connector_unregister(connector);
+#endif
 }
 EXPORT_SYMBOL(drm_connector_unregister_all);
 
@@ -3582,6 +3590,12 @@ int drm_mode_getfb(struct drm_device *dev,
 	r->pitch = fb->pitches[0];
 	if (fb->funcs->create_handle) {
 		if (file_priv->is_master || capable(CAP_SYS_ADMIN) ||
+		if (file_priv->is_master ||
+#ifdef __NetBSD__
+		    DRM_SUSER() ||
+#else
+		    capable(CAP_SYS_ADMIN) ||
+#endif
 		    drm_is_control_client(file_priv)) {
 			ret = fb->funcs->create_handle(fb, file_priv,
 						       &r->handle);
@@ -5846,11 +5860,19 @@ EXPORT_SYMBOL(drm_rotation_simplify);
  */
 void drm_mode_config_init(struct drm_device *dev)
 {
+#ifdef __NetBSD__
+	linux_mutex_init(&dev->mode_config.mutex);
+	drm_modeset_lock_init(&dev->mode_config.connection_mutex);
+	linux_mutex_init(&dev->mode_config.idr_mutex);
+	linux_mutex_init(&dev->mode_config.fb_lock);
+	linux_mutex_init(&dev->mode_config.blob_lock);
+#else
 	mutex_init(&dev->mode_config.mutex);
 	drm_modeset_lock_init(&dev->mode_config.connection_mutex);
 	mutex_init(&dev->mode_config.idr_mutex);
 	mutex_init(&dev->mode_config.fb_lock);
 	mutex_init(&dev->mode_config.blob_lock);
+#endif
 	INIT_LIST_HEAD(&dev->mode_config.fb_list);
 	INIT_LIST_HEAD(&dev->mode_config.crtc_list);
 	INIT_LIST_HEAD(&dev->mode_config.connector_list);
@@ -5945,6 +5967,13 @@ void drm_mode_config_cleanup(struct drm_device *dev)
 	idr_destroy(&dev->mode_config.tile_idr);
 	idr_destroy(&dev->mode_config.crtc_idr);
 	drm_modeset_lock_fini(&dev->mode_config.connection_mutex);
+
+#ifdef __NetBSD__
+	linux_mutex_init(&dev->mode_config.fb_lock);
+	linux_mutex_init(&dev->mode_config.idr_mutex);
+	linux_mutex_init(&dev->mode_config.mutex);
+	linux_mutex_init(&dev->mode_config.blob_lock);
+#endif
 }
 EXPORT_SYMBOL(drm_mode_config_cleanup);
 
